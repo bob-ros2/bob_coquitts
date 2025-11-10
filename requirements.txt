@@ -1,0 +1,4 @@
+TTS
+numpy
+# need sudo apt-get install libportaudio2
+sounddevice
