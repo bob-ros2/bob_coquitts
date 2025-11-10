@@ -11,6 +11,8 @@ from std_msgs.msg import String
 from TTS.api import TTS
 import sounddevice as sd
 import numpy as np
+import soundfile as sf
+from pathlib import Path
 
 DEFAULT_MODEL_NAME = 'tts_models/en/ljspeech/vits'
 DEFAULT_SAMPLE_RATE = 24000
@@ -97,6 +99,20 @@ class CoquiTTSnode(Node):
                 description="Audio sample rate for playback. Must match the model's native rate (e.g., 24000 for XTTS). (env: COQUITTS_SAMPLE_RATE)"
             )
         )
+        self.declare_parameter('play_audio',
+            os.environ.get('COQUITTS_PLAY_AUDIO', 'True').lower() in ('true', '1', 't'),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_BOOL,
+                description="If true, plays the generated audio directly. (env: COQUITTS_PLAY_AUDIO)"
+            )
+        )
+        self.declare_parameter('output_wav_path',
+            os.environ.get('COQUITTS_OUTPUT_WAV_PATH', ''),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="Path to save the output WAV file. If empty and play_audio is false, a default name is used. (env: COQUITTS_OUTPUT_WAV_PATH)"
+            )
+        )
 
         # Check in case of a xtts or your_tts model type that a reference_wav was provided
         if ('xtts' in self.get_parameter('model_name').value \
@@ -127,6 +143,31 @@ class CoquiTTSnode(Node):
             self.text_callback,
             10)
 
+    def _get_unique_filepath(self, filepath: Path) -> Path:
+        """
+        Generates a unique filepath by appending a counter if the file already exists.
+
+        Args:
+            filepath (pathlib.Path): The desired initial filepath.
+
+        Returns:
+            pathlib.Path: The original filepath if it's unique, otherwise a new
+                          unique filepath with a numbered suffix.
+        """
+        if not filepath.exists():
+            return filepath
+
+        parent = filepath.parent
+        stem = filepath.stem
+        suffix = filepath.suffix
+        counter = 1
+
+        while True:
+            new_filepath = parent / f"{stem}_{counter:03d}{suffix}"
+            if not new_filepath.exists():
+                return new_filepath
+            counter += 1
+
     def text_callback(self, msg):
         """
         Callback for the /text topic.
@@ -141,6 +182,19 @@ class CoquiTTSnode(Node):
         self.get_logger().debug(f"Received text for TTS: '{text}'")
 
         try:
+            play_audio = self.get_parameter('play_audio').value
+            output_wav_path = self.get_parameter('output_wav_path').value
+            
+            save_path_str = output_wav_path
+            # If playback is disabled and no path is given, use a default filename
+            if not play_audio and not save_path_str:
+                save_path_str = "tts_output.wav"
+
+            # If we are neither playing nor saving, do nothing.
+            if not play_audio and not save_path_str:
+                self.get_logger().warn("Node is configured to neither play nor save audio. No action taken.")
+                return
+
             # 1. Prepare arguments for TTS
             reference_wav = self.get_parameter('reference_wav').value
             model_name = self.get_parameter('model_name').value
@@ -167,18 +221,24 @@ class CoquiTTSnode(Node):
             with RedirectOutput(self.get_logger()):
                 wav_data = self.tts.tts(**tts_args)
 
-            # 2. Convert to NumPy array for playback
+            # 2. Convert to NumPy array
             wav_np = np.array(wav_data)
+            samplerate = self.get_parameter('sample_rate').value
 
-            # 3. Play the audio on the system's default audio output
-            self.get_logger().debug(
-                "Playing generated audio...")
+            # 3. Play the audio on the system's default audio output if enabled
+            if play_audio:
+                self.get_logger().debug(
+                    "Playing generated audio...")
+                sd.play(wav_np, samplerate=samplerate)
+                sd.wait()
+                self.get_logger().debug(
+                    "Audio playback finished.")
 
-            sd.play(wav_np, samplerate=self.get_parameter('sample_rate').value)
-            sd.wait()
-
-            self.get_logger().debug(
-                "Audio playback finished.")
+            # 4. Save the audio to a file if a path is specified
+            if save_path_str:
+                unique_filepath = self._get_unique_filepath(Path(save_path_str))
+                self.get_logger().info(f"Saving audio to: {unique_filepath}")
+                sf.write(unique_filepath, wav_np, samplerate)
 
         except Exception as e:
             self.get_logger().error(

@@ -7,6 +7,7 @@ This ROS package provides a node that interfaces with the [Coqui TTS](https://gi
 -   Converts text from a ROS topic into audible speech.
 -   Supports a wide range of pre-trained Coqui TTS models.
 -   Enables zero-shot voice cloning using XTTS models and a reference WAV file.
+-   Optionally saves generated speech to a WAV file, with automatic unique filename generation.
 -   GPU (`cuda`) or CPU acceleration.
 -   All key settings are configurable via ROS parameters.
 
@@ -139,6 +140,19 @@ ros2 run bob_coquitts tts --ros-args \
 ros2 topic pub --once --keep-alive 1.0 /text std_msgs/msg/String "data: Je suis en train d'apprendre à utiliser ce nouveau système, et j'aimerais savoir comment accéder aux paramètres avancés."
 ```
 
+### Example 5: Saving Audio to a File
+
+This example disables direct playback and saves the generated speech to a WAV file in the current directory. If `tts_output.wav` already exists, it will automatically be saved as `tts_output_001.wav`.
+
+```bash
+ros2 run bob_coquitts tts --ros-args \
+-p play_audio:=False \
+-p output_wav_path:='tts_output.wav'
+
+# In another terminal
+ros2 topic pub --once /text std_msgs/msg/String "data: 'This speech will be saved to a file instead of being played.'"
+```
+
 ## ROS Interface
 
 ### Subscribed Topics
@@ -157,4 +171,6 @@ All parameters can be set at runtime via the command line.
 | `language`        | string  | `''` (empty)                                 | Language code for multi-lingual models (e.g., `en`, `de`). Leave empty for single-language models. (env: `COQUITTS_LANGUAGE`)              |
 | `device`          | string  | `cpu`                                        | The compute device for TTS inference, e.g., `cuda` or `cpu`. (env: `COQUITTS_DEVICE`)                                                      |
 | `reference_wav`   | string  | `''` (empty)                                 | Path to a reference WAV file for voice cloning with `xtts` or `your_tts` models. (env: `COQUITTS_REFERENCE_WAV`)                           |
-| `sample_rate`     | integer | `24000`                                      | Audio sample rate for playback. **Must match the model's native rate** (e.g., 24000 for XTTS, 22050 for many VITS models). (env: `COQUITTS_SAMPLE_RATE`) |
+| `sample_rate`     | integer | `24000`                                      | Audio sample rate for playback.  Must match the model's native rate (e.g., 24000 for XTTS, 22050 for many VITS models). (env: `COQUITTS_SAMPLE_RATE`) |
+| `play_audio`      | boolean | `True`                                       | If true, plays the generated audio directly through the default sound device. (env: `COQUITTS_PLAY_AUDIO`)                               |
+| `output_wav_path` | string  | `''` (empty)                                 | Path to save the output WAV file. If the file exists, a number is appended. If empty and `play_audio` is false, `tts_output.wav` is used. (env: `COQUITTS_OUTPUT_WAV_PATH`) |
