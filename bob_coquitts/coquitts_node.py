@@ -66,35 +66,35 @@ class CoquiTTSnode(Node):
             os.environ.get('COQUITTS_MODEL_NAME', DEFAULT_MODEL_NAME),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
-                description="The Coqui TTS model to use. Run 'tts --list_models' to see options."
+                description="The Coqui TTS model to use. Run 'tts --list_models' to see options. (env: COQUITTS_MODEL_NAME)"
             )
         )
         self.declare_parameter('language', 
             os.environ.get('COQUITTS_LANGUAGE', ''),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
-                description="Language code for multi-lingual models (e.g., 'en', 'de'). Leave empty for single-language models."
+                description="Language code for multi-lingual models (e.g., 'en', 'de'). Leave empty for single-language models. (env: COQUITTS_LANGUAGE)"
             )
         )
         self.declare_parameter('device', 
             os.environ.get('COQUITTS_DEVICE', 'cpu'),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
-                description="The compute device for TTS inference, e.g., 'cuda' for NVIDIA GPUs or 'cpu'."
+                description="The compute device for TTS inference, e.g., 'cuda' for NVIDIA GPUs or 'cpu'. (env: COQUITTS_DEVICE)"
             )
         )
         self.declare_parameter('reference_wav', 
             os.environ.get('COQUITTS_REFERENCE_WAV', ''),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
-                description="Path to a reference WAV file for voice cloning with models like XTTS or YourTTS."
+                description="Path to a reference WAV file for voice cloning with models like XTTS or YourTTS. (env: COQUITTS_REFERENCE_WAV)"
             )
         )
         self.declare_parameter('sample_rate', 
             int(os.environ.get('COQUITTS_SAMPLE_RATE', DEFAULT_SAMPLE_RATE)),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_INTEGER,
-                description="Audio sample rate for playback. Must match the model's native rate (e.g., 24000 for XTTS)."
+                description="Audio sample rate for playback. Must match the model's native rate (e.g., 24000 for XTTS). (env: COQUITTS_SAMPLE_RATE)"
             )
         )
 
