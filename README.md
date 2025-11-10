@@ -78,7 +78,7 @@ colcon build --packages-select bob_coquitts
 
 ## Usage
 
-After building, source the workspace's `setup.bash` file and run the node using `ros2 run`.
+After building, source the workspace's `setup.bash` file and run the node using `ros2 run`. For detailed troubleshooting, launch the node with the argument `--ros-args` `--log-level DEBUG` to see all verbose diagnostic messages, including the redirected output from the underlying TTS library.
 
 ```bash
 # Source the local workspace
