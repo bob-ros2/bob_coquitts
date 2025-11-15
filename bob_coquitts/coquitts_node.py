@@ -176,14 +176,14 @@ class CoquiTTSnode(Node):
             )
         )
         self.declare_parameter('sentence_end_trim_chars',
-            os.environ.get('COQUITTS_SENTENCE_END_TRIM_CHARS', ''),
+            os.environ.get('COQUITTS_SENTENCE_END_TRIM_CHARS', '.,:!?'),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
                 description="A string of characters to remove from the end of each sentence before synthesis. (env: COQUITTS_SENTENCE_END_TRIM_CHARS)"
             )
         )
         self.declare_parameter('text_filter_chars',
-            os.environ.get('COQUITTS_TEXT_FILTER_CHARS', '„”‚‘“’'),
+            os.environ.get('COQUITTS_TEXT_FILTER_CHARS', '„”‘“’*-—#<>'),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
                 description="A string of characters to completely remove from the input text before any processing. (env: COQUITTS_TEXT_FILTER_CHARS)"
