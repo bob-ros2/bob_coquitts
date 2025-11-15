@@ -1,0 +1,83 @@
+# ==============================================================================
+# Full parameter configuration file for the Coqui TTS ROS Node.
+# ==============================================================================
+
+/**/tts:
+  ros__parameters:
+
+    # --------------------------------------------------------------------------
+    # General Model Configuration
+    # --------------------------------------------------------------------------
+    # The Coqui TTS model to use. Run `tts --list_models` for options.
+    model_name: "tts_models/en/ljspeech/vits"
+
+    # Language code for multi-lingual models (e.g., "en", "de", "fr").
+    # Leave empty for single-language models.
+    language: ""
+
+    # The compute device for TTS inference, e.g., "cuda" for NVIDIA GPUs or "cpu".
+    device: "cpu"
+
+    # Path to a reference WAV file for voice cloning with models like XTTS or YourTTS.
+    # Required for zero-shot cloning models.
+    reference_wav: ""
+
+    # --------------------------------------------------------------------------
+    # Audio Output Configuration
+    # --------------------------------------------------------------------------
+    # Audio sample rate for playback. Must match the model's native rate
+    # (e.g., 24000 for XTTS, 22050 for many VITS models).
+    sample_rate: 24000
+
+    # If true, plays the generated audio directly through the default sound device.
+    play_audio: True
+
+    # Path to save the output WAV file. If the file exists, a number is appended.
+    # If this is empty and 'play_audio' is false, a default name "tts_output.wav" is used.
+    output_wav_path: ""
+
+    # --------------------------------------------------------------------------
+    # Text Processing & Buffering Configuration
+    # --------------------------------------------------------------------------
+    # A regex pattern to remove matches from the input text. Applied first.
+    # Example to remove Markdown bold/italics: '\*+'
+    text_filter_regex: ""
+
+    # A string of characters to completely remove from the input text before any other processing.
+    # Default includes common typographical quotes.
+    text_filter_chars: '„”‚‘“’'
+
+    # Characters used to split the buffered text into sentences.
+    sentence_delimiters: ".!?\n"
+
+    # Max number of sentences from the internal buffer to process at once.
+    # Helps manage the size of text chunks sent to the TTS model.
+    sentences_max: 2
+
+    # A string of characters to remove from the very end of a sentence chunk
+    # before it is sent to the TTS model (e.g., ":", ">").
+    sentence_end_trim_chars: ""
+
+    # Enable/disable Coqui's internal sentence splitting. It is recommended to keep this
+    # 'False' and rely on the node's superior buffering logic. Set to 'True' only
+    # if you are sending very long, unstructured paragraphs in a single message.
+    split_sentences: False
+
+    # --------------------------------------------------------------------------
+    # XTTS Model Fine-Tuning Parameters
+    # (These have no effect on non-XTTS models)
+    # --------------------------------------------------------------------------
+    # Controls randomness in generation. Lower values are more deterministic and stable.
+    temperature: 0.2
+
+    # A factor to penalize longer sequences. Default is usually fine.
+    length_penalty: 1.0
+
+    # Penalty for repeating tokens. Higher values reduce repetition.
+    repetition_penalty: 2.0
+
+    # Samples from the k most likely next tokens.
+    top_k: 40
+
+    # Samples from a nucleus of tokens with a cumulative probability of p.
+    top_p: 0.9
