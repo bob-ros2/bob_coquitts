@@ -1,23 +1,24 @@
 import os
 import sys
+import re
 from io import StringIO
+from pathlib import Path
 from contextlib import redirect_stdout
 from contextlib import redirect_stderr
+# ROS
 import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import ParameterDescriptor
 from rcl_interfaces.msg import ParameterType
 from std_msgs.msg import String
+# TTS
 from TTS.api import TTS
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
-from pathlib import Path
 
 DEFAULT_MODEL_NAME = 'tts_models/en/ljspeech/vits'
 DEFAULT_SAMPLE_RATE = 24000
-#XTTS_MODEL_NAME = 'tts_models/multilingual/multi-dataset/xtts_v2'
-#XTTS_REFERENCE_WAV_PATH = "/blue/dev/TTS/eva_24khz.wav"
 
 class RedirectOutput:
     """
@@ -43,22 +44,27 @@ class RedirectOutput:
         output = self._buffer.getvalue().strip()
         if output:
             for line in output.splitlines():
-                self._logger.debug(line)
+                self._logger.debug(f"Coqui: {line}")
 
 class CoquiTTSnode(Node):
     """
     A ROS 2 node for text-to-speech synthesis using the Coqui TTS library.
 
-    This node subscribes to a topic to receive text messages and uses a
-    Coqui TTS model to generate audio, which is then played through the
-    system's default audio output device.
+    This node subscribes to a 'text' topic, buffers incoming text fragments,
+    and intelligently splits them into complete sentences. These sentences are
+    then processed in configurable chunks to generate audio. It offers
+    extensive ROS parameters to control the TTS model, voice cloning, audio
+    playback, and text processing behavior like filtering and trimming.
+    It also publishes the text being synthesized to a 'text_speaking' topic.
     """
     def __init__(self):
         """
         Initialize the CoquiTTSnode.
 
-        This involves declaring ROS parameters for configuration, loading the
-        specified TTS model, and setting up a subscriber for incoming text.
+        Declares all ROS parameters for configuration, loads the specified
+        TTS model, and sets up a subscriber for incoming text. It also
+        initializes a publisher for the text being spoken and a text buffer
+        with a flush timer to handle streaming text input.
         """
         super().__init__('tts')
 
@@ -113,6 +119,83 @@ class CoquiTTSnode(Node):
                 description="Path to save the output WAV file. If empty and play_audio is false, a default name is used. (env: COQUITTS_OUTPUT_WAV_PATH)"
             )
         )
+        self.declare_parameter('temperature',
+            float(os.environ.get('COQUITTS_TEMPERATURE', 0.2)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_DOUBLE,
+                description="XTTS only: Controls randomness in generation. Lower values are more deterministic. (env: COQUITTS_TEMPERATURE)"
+            )
+        )
+        self.declare_parameter('length_penalty',
+            float(os.environ.get('COQUITTS_LENGTH_PENALTY', 1.0)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_DOUBLE,
+                description="XTTS only: A factor to penalize longer sequences. (env: COQUITTS_LENGTH_PENALTY)"
+            )
+        )
+        self.declare_parameter('repetition_penalty',
+            float(os.environ.get('COQUITTS_REPETITION_PENALTY', 2.0)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_DOUBLE,
+                description="XTTS only: Penalty for repeating tokens. Higher values reduce repetition. (env: COQUITTS_REPETITION_PENALTY)"
+            )
+        )
+        self.declare_parameter('top_k',
+            int(os.environ.get('COQUITTS_TOP_K', 40)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_INTEGER,
+                description="XTTS only: Samples from the k most likely next tokens. (env: COQUITTS_TOP_K)"
+            )
+        )
+        self.declare_parameter('top_p',
+            float(os.environ.get('COQUITTS_TOP_P', 0.9)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_DOUBLE,
+                description="XTTS only: Samples from a nucleus of tokens with a cumulative probability of p. (env: COQUITTS_TOP_P)"
+            )
+        )
+        self.declare_parameter('split_sentences',
+            os.environ.get('COQUITTS_SPLIT_SENTENCES', 'False').lower() in ('true', '1', 't'),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_BOOL,
+                description="Enable/disable Coqui's internal sentence splitting. Disable if you are sending single, complete sentences. (env: COQUITTS_SPLIT_SENTENCES)"
+            )
+        )
+        self.declare_parameter('sentences_max',
+            int(os.environ.get('COQUITTS_SENTENCES_MAX', 2)),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_INTEGER,
+                description="Max number of sentences to process at once. Prevents feeding too large chunks to the model. (env: COQUITTS_SENTENCES_MAX)"
+            )
+        )
+        self.declare_parameter('sentence_delimiters',
+            os.environ.get('COQUITTS_SENTENCE_DELIMITERS', '.!?\n'),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="Characters used to split text into sentences. (env: COQUITTS_SENTENCE_DELIMITERS)"
+            )
+        )
+        self.declare_parameter('sentence_end_trim_chars',
+            os.environ.get('COQUITTS_SENTENCE_END_TRIM_CHARS', ''),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="A string of characters to remove from the end of each sentence before synthesis. (env: COQUITTS_SENTENCE_END_TRIM_CHARS)"
+            )
+        )
+        self.declare_parameter('text_filter_chars',
+            os.environ.get('COQUITTS_TEXT_FILTER_CHARS', '„”‚‘“’'),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="A string of characters to completely remove from the input text before any processing. (env: COQUITTS_TEXT_FILTER_CHARS)"
+            )
+        )
+        self.declare_parameter('text_filter_regex',
+            os.environ.get('COQUITTS_TEXT_FILTER_REGEX', ''),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="A regex pattern to remove matches from the input text. Applied before 'text_filter_chars'. (env: COQUITTS_TEXT_FILTER_REGEX)"
+            )
+        )
 
         # Check in case of a xtts or your_tts model type that a reference_wav was provided
         if ('xtts' in self.get_parameter('model_name').value \
@@ -141,7 +224,15 @@ class CoquiTTSnode(Node):
             String,
             'text',
             self.text_callback,
-            10)
+            100)
+
+        # Publisher for the text currently being spoken
+        self.speaking_pub = self.create_publisher(String, 'text_speaking', 100)
+
+        # Buffer for incoming text and a timer to process it after a pause
+        self.text_buffer = ""
+        # Timer to process the buffer after a pause in incoming text
+        self.flush_timer = None
 
     def _get_unique_filepath(self, filepath: Path) -> Path:
         """
@@ -172,19 +263,125 @@ class CoquiTTSnode(Node):
         """
         Callback for the /text topic.
 
-        Receives a string message, generates audio using the TTS model,
-        and plays it.
+        Filters unwanted characters from the incoming text, then appends it to a
+        buffer. It splits the buffer into complete sentences based on configurable
+        delimiters. These sentences are processed in chunks, and any incomplete
+        sentence fragment is kept in the buffer for the next message. A timer is
+        used to flush any remaining text after a pause in the input stream.
 
         Args:
-            msg (std_msgs.msg.String): The message containing the text to synthesize.
+            msg (std_msgs.msg.String): The message containing the text chunk.
         """
-        text = msg.data
-        self.get_logger().debug(f"Received text for TTS: '{text}'")
+        text_chunk = msg.data
+
+        # 1. Apply Regex Filter
+        regex_pattern = self.get_parameter('text_filter_regex').value
+        if regex_pattern:
+            try:
+                text_chunk = re.sub(regex_pattern, '', text_chunk)
+            except re.error as e:
+                self.get_logger().error(
+                    f"Invalid regex for 'text_filter_regex': '{regex_pattern}'. Error: {e}. Skipping regex filter for this chunk.")
+
+        # 2. Apply Character Filter
+        filter_chars = self.get_parameter('text_filter_chars').value
+        if filter_chars:
+            # Create a translation table to remove specified characters
+            translation_table = str.maketrans('', '', filter_chars)
+            text_chunk = text_chunk.translate(translation_table)
+
+        # Always cancel the flush timer when new text arrives
+        if self.flush_timer is not None:
+            self.flush_timer.cancel()
+
+        self.text_buffer += text_chunk
+        
+        # Get delimiters from ROS param and build a safe regex pattern
+        delimiters = self.get_parameter('sentence_delimiters').value
+        pattern = '|'.join(map(re.escape, delimiters))
+        pattern = f'({pattern})'
+
+        # Split the text by delimiters, but keep the delimiters in the list
+        parts = re.split(pattern, self.text_buffer)
+        
+        # If parts has fewer than 2 elements, we don't have a complete sentence yet.
+        if len(parts) < 2:
+            # (Re)start a timer to flush the buffer if no new text comes in
+            self.flush_timer = self.create_timer(0.5, self.flush_buffer_callback)
+            return
+
+        # Reconstruct sentences by joining text parts with their delimiters
+        sentences = []
+        # Iterate in pairs (text, delimiter)
+        for i in range(0, len(parts) - 1, 2):
+            sentence = (parts[i] + parts[i+1]).strip()
+            if sentence: # Avoid adding empty/whitespace-only sentences
+                sentences.append(sentence)
+        
+        # The very last part is the new, incomplete buffer content
+        self.text_buffer = parts[-1]
+
+        sentences_max = self.get_parameter('sentences_max').value
+        
+        # Process sentence chunks if we have any
+        if sentences:
+            for i in range(0, len(sentences), sentences_max):
+                chunk = sentences[i:i + sentences_max]
+                text_to_process = " ".join(chunk)
+                self._process_text(text_to_process)
+
+        # (Re)start a timer to flush the buffer if no new text comes in
+        self.flush_timer = self.create_timer(0.5, self.flush_buffer_callback)
+
+    def flush_buffer_callback(self):
+        """
+        Processes any remaining text in the buffer after a pause.
+
+        This method is triggered by a timer when no new text has arrived for a
+        short period, ensuring that the last sentence or fragment is not left
+        unspoken.
+        """
+        # This timer is a one-shot, so cancel it to prevent it from running again.
+        if self.flush_timer is not None:
+            self.flush_timer.cancel()
+            self.flush_timer = None
+
+        text_to_process = self.text_buffer.strip()
+        self.text_buffer = ""  # Clear buffer
+
+        if text_to_process:
+            self._process_text(text_to_process)
+        else:
+            self.get_logger().debug("Flush timer ran, but buffer was empty.")
+
+    def _process_text(self, text_to_process: str):
+        """
+        The core TTS processing and audio generation logic.
+
+        This function takes a prepared text chunk, performs final trimming of
+        unwanted end characters, publishes the text to a topic, and then uses
+        the Coqui TTS model to generate audio. The audio is then played or
+        saved according to node parameters.
+
+        Args:
+            text_to_process (str): The text string to synthesize.
+        """
+        # Trim unwanted trailing characters from the text before processing
+        trim_chars = self.get_parameter('sentence_end_trim_chars').value
+        if trim_chars:
+            text_to_process = text_to_process.rstrip(trim_chars)
+
+        if not text_to_process:
+            return
+
+        # Publish the text that is about to be spoken
+        self.speaking_pub.publish(String(data=text_to_process))
+        self.get_logger().debug(f"Processing for TTS: '{text_to_process}'")
 
         try:
             play_audio = self.get_parameter('play_audio').value
             output_wav_path = self.get_parameter('output_wav_path').value
-            
+
             save_path_str = output_wav_path
             # If playback is disabled and no path is given, use a default filename
             if not play_audio and not save_path_str:
@@ -200,7 +397,8 @@ class CoquiTTSnode(Node):
             model_name = self.get_parameter('model_name').value
             
             tts_args = {
-                "text": text,
+                "text": text_to_process,
+                "split_sentences": self.get_parameter('split_sentences').value
             }
 
             if self.get_parameter('language').value:
@@ -216,6 +414,13 @@ class CoquiTTSnode(Node):
                     f"Model '{model_name}' requires a reference WAV file for voice cloning. "
                     "Please set the 'reference_wav' parameter.")
                 return
+
+            if 'xtts' in model_name:
+                tts_args["temperature"] = self.get_parameter('temperature').value
+                tts_args["length_penalty"] = self.get_parameter('length_penalty').value
+                tts_args["repetition_penalty"] = self.get_parameter('repetition_penalty').value
+                tts_args["top_k"] = self.get_parameter('top_k').value
+                tts_args["top_p"] = self.get_parameter('top_p').value
 
             # Generate the audio using the received text
             with RedirectOutput(self.get_logger()):
