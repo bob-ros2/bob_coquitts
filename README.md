@@ -4,14 +4,18 @@ This ROS package provides a robust node that interfaces with the [Coqui TTS](htt
 
 ## Features
 
--   **Intelligent Text Processing**: Buffers incoming text fragments and splits them into complete sentences to ensure high-quality, natural-sounding speech generation and prevent model "hallucinations".
--   **Advanced Text Filtering**: Automatically filters unwanted characters (e.g., typographical quotes) and trims trailing characters (e.g., colons) from sentences before synthesis.
--   **Real-time Feedback**: Publishes the exact text chunk being synthesized to a separate ROS topic, allowing other nodes to synchronize with the speech output.
--   **Wide Model Support**: Converts text from a ROS topic into audible speech using a wide range of pre-trained Coqui TTS models.
--   **Zero-Shot Voice Cloning**: Enables voice cloning using XTTS models and a reference WAV file.
+-   **Intelligent Text Buffering**: Waits for pauses in the incoming text stream before processing to ensure complete thoughts are synthesized. This correctly handles complex patterns like numbers (`2.500`) that might be split across multiple messages.
+-   **Dual Splitting Modes**: Choose between two modes for sentence splitting via the `split_sentences` parameter:
+    1.  **Manual Mode (Default)**: Use custom delimiters (`sentence_delimiters`) to precisely control how text is split into sentences.
+    2.  **Automatic Mode**: Let Coqui's powerful internal splitter handle long, unstructured text blocks.
+-   **Advanced Text Normalization**:
+    -   Automatically filters pictorial emojis and symbols by default using a Unicode-aware regex filter.
+    -   Removes user-defined characters (e.g., typographical quotes `„“`).
+    -   Normalizes numbers by removing thousands separators (e.g., `2.500` -> `2500`) to ensure correct pronunciation.
+-   **Real-time Feedback**: Publishes the exact text chunk being synthesized to a separate ROS topic (`/text_speaking`), allowing other nodes to synchronize with the speech output.
+-   **Wide Model Support & Voice Cloning**: Supports a vast range of Coqui models, including zero-shot voice cloning with XTTS.
 -   **Flexible Output**: Optionally plays audio directly or saves it to a WAV file with automatic unique filename generation.
 -   **Hardware Acceleration**: Supports both GPU (`cuda`) and CPU inference.
--   **Highly Configurable**: All key settings are exposed as ROS parameters for easy tuning.
 
 ## Prerequisites
 
@@ -32,105 +36,79 @@ sudo apt-get install libportaudio2 libasound-dev libsndfile1
 1.  **Clone the Package**:
     Clone this repository into your ROS 2 workspace's `src` directory.
 
-    ```bash
-    cd ~/ros2_ws/src
-    git clone https://github.com/bob-ros2/bob_coquitts
-    ```
-
 2.  **Install Python Dependencies**:
-    It is recommended to use a Python virtual environment to avoid package conflicts.
+    This node requires the `regex` library for full Unicode support (e.g., filtering emojis). It is recommended to use a Python virtual environment.
 
     ```bash
     cd ~/ros2_ws
     # If using a virtual environment, activate it first
     pip install -r src/bob_coquitts/requirements.txt
     ```
-    or install them manually
-    
-    ```bash
-    pip install TTS sounddevice numpy soundfile
+    The `requirements.txt` file should contain:
     ```
-    The `TTS` library will install numerous dependencies, including `torch`.
+    TTS
+    sounddevice
+    numpy
+    soundfile
+    regex
+    ```
 
 ## Building
 
 Source your ROS 2 installation and build the package using `colcon`.
 
 ```bash
-# Navigate to the root of your workspace
 cd ~/ros2_ws
-
-# Source ROS 2 (adjust for your distribution)
 source /opt/ros/humble/setup.bash
-
-# Build the package
 colcon build --packages-select bob_coquitts
 ```
 
 ## Usage
 
-After building, source the workspace's `setup.bash` file. For detailed troubleshooting, launch the node with `--log-level DEBUG` to see all diagnostic messages.
+After building, source the workspace's `setup.bash` file. For detailed troubleshooting, launch the node with `--log-level DEBUG`.
 
 ```bash
-# Source the local workspace
 source ~/ros2_ws/install/setup.bash
-
-# Launch the node
 ros2 run bob_coquitts tts
 ```
 
-### Example 1: Standard Single-Speaker Model (Default)
+### Example 1: XTTS Voice Cloning with Default Filtering
 
-This uses the `tts_models/en/ljspeech/vits` model, a single female English voice.
-
-```bash
-ros2 run bob_coquitts tts --ros-args -p device:='cpu'
-```
-
-### Example 2: XTTS Voice Cloning with Text Cleaning
-
-This example uses the powerful XTTS v2 model for voice cloning, which requires a `reference_wav`. We also override the `sentence_end_trim_chars` parameter to remove trailing colons, which can cause unnatural-sounding audio.
+This example uses the powerful XTTS v2 model. By default, it will filter emojis and normalize numbers.
 
 ```bash
 ros2 run bob_coquitts tts --ros-args \
 -p model_name:='tts_models/multilingual/multi-dataset/xtts_v2' \
 -p reference_wav:='/path/to/your/voice.wav' \
--p language:='en' \
+-p language:='de' \
 -p device:='cuda' \
--p sentence_end_trim_chars:="':'"
+-p number_thousands_separator:="'.'"
 
-# In another terminal, publish text with a colon
-ros2 topic pub --once /text std_msgs/msg/String "data: 'Here is my statement:'"
+# In another terminal, publish text with emojis and a formatted number
+ros2 topic pub --once /text std_msgs/msg/String "data: 'Das kostet 2.500 Credits. ✨'"
 
 # In a third terminal, listen to the cleaned text being spoken
 ros2 topic echo /text_speaking
-# Output will be: data: Here is my statement
+# Output will be: data: Das kostet 2500 Credits.
 ```
 
-### Example 3: German Single-Speaker Model
+### Example 2: Using Coqui's Internal Splitter for Long Text
 
-This example uses a VITS model. Since it's a single-language model, the `language` and `reference_wav` parameters are not needed.
+If you are feeding a large, unstructured block of text, it's best to let Coqui handle the splitting.
 
 ```bash
-ros2 run bob_coquitts tts --ros-args \
--p model_name:='tts_models/de/css10/vits-neon' \
--p device:='cpu'
+ros2 run bob_coquitts tts --ros-args -p split_sentences:=True
 
-# In another terminal
-ros2 topic pub --once /text std_msgs/msg/String "data: 'Die Integration von kreativen Modellen ist sehr sinnvoll.'"
+# Publish a long paragraph
+ros2 topic pub --once /text std_msgs/msg/String "data: 'This is the first sentence. This is the second sentence which is much longer and might exceed the character limit if not handled properly. Coquis splitter will take care of it.'"
 ```
 
-### Example 4: Saving Audio to a File
+### Example 3: Disabling the Regex Emoji Filter
 
-This disables direct playback and saves the generated speech to `tts_output.wav`. If the file exists, it will be saved as `tts_output_001.wav`.
+If you want to disable the default emoji filtering, set the `text_filter_regex` parameter to an empty string.
 
 ```bash
-ros2 run bob_coquitts tts --ros-args \
--p play_audio:=False \
--p output_wav_path:='tts_output.wav'
-
-# In another terminal
-ros2 topic pub --once /text std_msgs/msg/String "data: 'This speech will be saved to a file.'"
+ros2 run bob_coquitts tts --ros-args -p text_filter_regex:=""
 ```
 
 ## ROS Interface
@@ -139,38 +117,38 @@ ros2 topic pub --once /text std_msgs/msg/String "data: 'This speech will be save
 
 | Topic Name | Message Type           | Description                                    |
 |------------|------------------------|------------------------------------------------|
-| `/text`    | `std_msgs/msg/String`  | The text to be synthesized into speech. Text is buffered and processed in complete sentences. |
+| `/text`    | `std_msgs/msg/String`  | The text to be synthesized. The node buffers incoming text and processes it after a pause. |
 
 ### Published Topics
 
 | Topic Name        | Message Type           | Description                                    |
 |-------------------|------------------------|------------------------------------------------|
-| `/text_speaking`  | `std_msgs/msg/String`  | Publishes the sentence or chunk of text exactly as it is being sent to the TTS model for synthesis. |
+| `/text_speaking`  | `std_msgs/msg/String`  | Publishes the cleaned, normalized sentence or chunk of text exactly as it is being sent to the TTS model. |
 
 ### Parameters
 
-All parameters can be set at runtime via the command line.
-
-| Parameter Name            | Type    | Default Value                 | Description                                                                                                                              |
-|---------------------------|---------|-------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| **General**               |         |                               |                                                                                                                                          |
-| `model_name`              | string  | `tts_models/en/ljspeech/vits` | The Coqui TTS model to use. Run `tts --list_models` for options. (env: `COQUITTS_MODEL_NAME`)                                              |
-| `language`                | string  | `''` (empty)                  | Language code for multi-lingual models (e.g., `en`, `de`). (env: `COQUITTS_LANGUAGE`)                                                      |
-| `device`                  | string  | `cpu`                         | Compute device for TTS inference, e.g., `cuda` or `cpu`. (env: `COQUITTS_DEVICE`)                                                          |
-| `reference_wav`           | string  | `''` (empty)                  | Path to a reference WAV file for voice cloning with `xtts` or `your_tts`. (env: `COQUITTS_REFERENCE_WAV`)                                  |
-| **Audio Output**          |         |                               |                                                                                                                                          |
-| `sample_rate`             | integer | `24000`                       | Audio sample rate for playback. Must match the model's native rate. (env: `COQUITTS_SAMPLE_RATE`)                                        |
-| `play_audio`              | boolean | `True`                        | If true, plays the generated audio directly. (env: `COQUITTS_PLAY_AUDIO`)                                                                |
-| `output_wav_path`         | string  | `''` (empty)                  | Path to save the output WAV file. If empty and `play_audio` is false, `tts_output.wav` is used. (env: `COQUITTS_OUTPUT_WAV_PATH`)         |
-| **Text Processing**       |         |                               |                                                                                                                                          |
-| `split_sentences`         | boolean | `False`                       | Enable Coqui's internal sentence splitter. Recommended to be `True` if sending very long, unstructured text blocks. (env: `COQUITTS_SPLIT_SENTENCES`) |
-| `sentences_max`           | integer | `2`                           | Max number of sentences from the internal buffer to process at once. (env: `COQUITTS_SENTENCES_MAX`)                                     |
-| `sentence_delimiters`     | string  | `.!?\n`                       | Characters used to split the buffered text into sentences. (env: `COQUITTS_SENTENCE_DELIMITERS`)                                         |
-| `sentence_end_trim_chars` | string  | `''` (empty)                  | A string of characters to remove from the end of each sentence before synthesis (e.g., `:`). (env: `COQUITTS_SENTENCE_END_TRIM_CHARS`) |
-| `text_filter_chars`       | string  | `„”‚‘“”’`                      | Characters to completely remove from the input text before any processing. (env: `COQUITTS_TEXT_FILTER_CHARS`)                            |
-| **XTTS Tuning**           |         |                               |                                                                                                                                          |
-| `temperature`             | double  | `0.2`                         | Controls randomness in generation. Lower values are more deterministic. (env: `COQUITTS_TEMPERATURE`)                                      |
-| `length_penalty`          | double  | `1.0`                         | A factor to penalize longer sequences. (env: `COQUITTS_LENGTH_PENALTY`)                                                                  |
-| `repetition_penalty`      | double  | `2.0`                         | Penalty for repeating tokens. Higher values reduce repetition. (env: `COQUITTS_REPETITION_PENALTY`)                                      |
-| `top_k`                   | integer | `40`                          | Samples from the k most likely next tokens. (env: `COQUITTS_TOP_K`)                                                                        |
-| `top_p`                   | double  | `0.9`                         | Samples from tokens with a cumulative probability of p. (env: `COQUITTS_TOP_P`)                                                            |
+| Parameter Name            | Type    | Default Value                                | Description                                                                                                                                          |
+|---------------------------|---------|----------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **General**               |         |                                              |                                                                                                                                                      |
+| `model_name`              | string  | `tts_models/en/ljspeech/vits`                | The Coqui TTS model to use. (env: `COQUITTS_MODEL_NAME`)                                                                                             |
+| `language`                | string  | `''`                                         | Language code for multi-lingual models (e.g., `en`, `de`). (env: `COQUITTS_LANGUAGE`)                                                                |
+| `device`                  | string  | `cpu`                                        | Compute device for inference (`cuda` or `cpu`). (env: `COQUITTS_DEVICE`)                                                                             |
+| `reference_wav`           | string  | `''`                                         | Path to a reference WAV file for voice cloning. (env: `COQUITTS_REFERENCE_WAV`)                                                                      |
+| **Audio Output**          |         |                                              |                                                                                                                                                      |
+| `sample_rate`             | integer | `24000`                                      | Audio sample rate for playback. Must match the model's native rate. (env: `COQUITTS_SAMPLE_RATE`)                                                    |
+| `play_audio`              | boolean | `True`                                       | If true, plays the generated audio directly. (env: `COQUITTS_PLAY_AUDIO`)                                                                            |
+| `output_wav_path`         | string  | `''`                                         | Path to save the output WAV file. (env: `COQUITTS_OUTPUT_WAV_PATH`)                                                                                  |
+| **Text Processing**       |         |                                              |                                                                                                                                                      |
+| `split_sentences`         | boolean | `False`                                      | **Mode switch for splitting.** If `True`, Coqui handles splitting. If `False` (default), the node uses manual splitting below. (env: `COQUITTS_SPLIT_SENTENCES`) |
+| `sentence_delimiters`     | string  | `.!?\n`                                      | Characters used for manual splitting (only when `split_sentences` is `False`). (env: `COQUITTS_SENTENCE_DELIMITERS`)                             |
+| `sentences_max`           | integer | `2`                                          | Max number of sentences to process at once in manual mode. (env: `COQUITTS_SENTENCES_MAX`)                                                          |
+| `number_thousands_separator` | string | `.`                                       | Character to remove from between digits (e.g., `.` in `1.234`). (env: `COQUITTS_NUMBER_THOUSANDS_SEPARATOR`)                                     |
+| `sentence_end_trim_chars` | string  | `.,:!?`                                      | Characters to remove from the very end of a processed text chunk. (env: `COQUITTS_SENTENCE_END_TRIM_CHARS`)                                        |
+| `text_filter_chars`       | string  | `„”‘“’*—#<>`                                  | Specific characters to remove from the entire text. (env: `COQUITTS_TEXT_FILTER_CHARS`)                                                            |
+| `text_filter_regex`       | string  | `[\p{Emoji_Presentation}\p{Extended_Pictographic}]` | Regex to remove patterns from the entire text. **Requires `regex` pip package.** Default filters emojis. (env: `COQUITTS_TEXT_FILTER_REGEX`)     |
+| **XTTS Tuning**           |         |                                              |                                                                                                                                                      |
+| `temperature`             | double  | `0.2`                                        | Controls randomness. Lower is more deterministic. (env: `COQUITTS_TEMPERATURE`)                                                                    |
+| `length_penalty`          | double  | `1.0`                                        | Factor to penalize longer sequences. (env: `COQUITTS_LENGTH_PENALTY`)                                                                              |
+| `repetition_penalty`      | double  | `2.0`                                        | Penalty for repeating tokens. (env: `COQUITTS_REPETITION_PENALTY`)                                                                                 |
+| `top_k`                   | integer | `40`                                         | Samples from the k most likely next tokens. (env: `COQUITTS_TOP_K`)                                                                                |
+| `top_p`                   | double  | `0.9`                                        | Samples from tokens with a cumulative probability of p. (env: `COQUITTS_TOP_P`)                                                                    |

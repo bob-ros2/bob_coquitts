@@ -1,6 +1,7 @@
 import os
 import sys
-import re
+import logging
+import regex as re # use extended regex
 from io import StringIO
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -8,6 +9,7 @@ from contextlib import redirect_stderr
 # ROS
 import rclpy
 from rclpy.node import Node
+from rclpy.logging import LoggingSeverity
 from rcl_interfaces.msg import ParameterDescriptor
 from rcl_interfaces.msg import ParameterType
 from std_msgs.msg import String
@@ -27,8 +29,9 @@ class RedirectOutput:
     This is a workaround to capture and redirect the verbose print statements
     from the Coqui TTS library into the ROS logger, keeping the console clean.
     """
-    def __init__(self, logger):
+    def __init__(self, logger, level='info'):
         self._logger = logger
+        self._log_level = level
         self._buffer = StringIO()
 
     def __enter__(self):
@@ -44,7 +47,12 @@ class RedirectOutput:
         output = self._buffer.getvalue().strip()
         if output:
             for line in output.splitlines():
-                self._logger.debug(f"Coqui: {line}")
+                if self._log_level == 'debug':
+                    self._logger.debug(f"Coqui: {line}")
+                if self._log_level == 'warn':
+                    self._logger.warn(f"Coqui: {line}")
+                if self._log_level == 'info':
+                    self._logger.info(f"Coqui: {line}")
 
 class CoquiTTSnode(Node):
     """
@@ -67,6 +75,15 @@ class CoquiTTSnode(Node):
         with a flush timer to handle streaming text input.
         """
         super().__init__('tts')
+
+        # Synchronize logging level with ROS logger verbosity for library output.
+        logging.basicConfig(
+            level = (logging.DEBUG
+                if self.get_logger().get_effective_level() \
+                    == LoggingSeverity.DEBUG \
+                else logging.INFO),
+            format="[%(levelname)s] [%(asctime)s.] [%(name)s]: %(message)s",
+            datefmt="%s")
 
         # ROS parameters
 
@@ -162,7 +179,7 @@ class CoquiTTSnode(Node):
             )
         )
         self.declare_parameter('sentences_max',
-            int(os.environ.get('COQUITTS_SENTENCES_MAX', 2)),
+            int(os.environ.get('COQUITTS_SENTENCES_MAX', 1)),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_INTEGER,
                 description="Max number of sentences to process at once. Prevents feeding too large chunks to the model. (env: COQUITTS_SENTENCES_MAX)"
@@ -183,17 +200,24 @@ class CoquiTTSnode(Node):
             )
         )
         self.declare_parameter('text_filter_chars',
-            os.environ.get('COQUITTS_TEXT_FILTER_CHARS', '„”‘“’*-—#<>'),
+            os.environ.get('COQUITTS_TEXT_FILTER_CHARS', '„”‘“’*—#<>'),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
                 description="A string of characters to completely remove from the input text before any processing. (env: COQUITTS_TEXT_FILTER_CHARS)"
             )
         )
         self.declare_parameter('text_filter_regex',
-            os.environ.get('COQUITTS_TEXT_FILTER_REGEX', ''),
+            os.environ.get('COQUITTS_TEXT_FILTER_REGEX', r'[\p{Emoji_Presentation}\p{Extended_Pictographic}]'),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
                 description="A regex pattern to remove matches from the input text. Applied before 'text_filter_chars'. (env: COQUITTS_TEXT_FILTER_REGEX)"
+            )
+        )
+        self.declare_parameter('number_thousands_separator',
+            os.environ.get('COQUITTS_NUMBER_THOUSANDS_SEPARATOR', '.'),
+            ParameterDescriptor(
+                type=ParameterType.PARAMETER_STRING,
+                description="The character used as a thousands separator in numbers (e.g., '.' in '1.234'). This character will be removed from numbers before synthesis. (env: COQUITTS_NUMBER_THOUSANDS_SEPARATOR)"
             )
         )
 
@@ -211,9 +235,10 @@ class CoquiTTSnode(Node):
             f"Loading Coqui TTS model {self.get_parameter('model_name').value}")
 
         try:
-            self.tts = TTS(
-                model_name=self.get_parameter('model_name').value,
-                ).to(self.get_parameter('device').value)
+            with RedirectOutput(self.get_logger(), 'info'):
+                self.tts = TTS(
+                    model_name=self.get_parameter('model_name').value,
+                    ).to(self.get_parameter('device').value)
             self.get_logger().info("Coqui TTS model loaded successfully.")
 
         except Exception as e:
@@ -224,10 +249,10 @@ class CoquiTTSnode(Node):
             String,
             'text',
             self.text_callback,
-            100)
+            1000)
 
         # Publisher for the text currently being spoken
-        self.speaking_pub = self.create_publisher(String, 'text_speaking', 100)
+        self.speaking_pub = self.create_publisher(String, 'text_speaking', 1000)
 
         # Buffer for incoming text and a timer to process it after a pause
         self.text_buffer = ""
@@ -261,117 +286,129 @@ class CoquiTTSnode(Node):
 
     def text_callback(self, msg):
         """
-        Callback for the /text topic.
+        Callback for the /text topic; appends text and manages a flush timer.
 
-        Filters unwanted characters from the incoming text, then appends it to a
-        buffer. It splits the buffer into complete sentences based on configurable
-        delimiters. These sentences are processed in chunks, and any incomplete
-        sentence fragment is kept in the buffer for the next message. A timer is
-        used to flush any remaining text after a pause in the input stream.
+        This function's sole responsibility is to append incoming raw text chunks
+        to the internal buffer and reset a timer. All complex processing is
+        deferred to the `flush_buffer_callback` to ensure that text is only
+        processed after a natural pause in the input stream.
 
         Args:
             msg (std_msgs.msg.String): The message containing the text chunk.
         """
-        text_chunk = msg.data
-
-        # 1. Apply Regex Filter
-        regex_pattern = self.get_parameter('text_filter_regex').value
-        if regex_pattern:
-            try:
-                text_chunk = re.sub(regex_pattern, '', text_chunk)
-            except re.error as e:
-                self.get_logger().error(
-                    f"Invalid regex for 'text_filter_regex': '{regex_pattern}'. Error: {e}. Skipping regex filter for this chunk.")
-
-        # 2. Apply Character Filter
-        filter_chars = self.get_parameter('text_filter_chars').value
-        if filter_chars:
-            # Create a translation table to remove specified characters
-            translation_table = str.maketrans('', '', filter_chars)
-            text_chunk = text_chunk.translate(translation_table)
-
         # Always cancel the flush timer when new text arrives
         if self.flush_timer is not None:
             self.flush_timer.cancel()
 
-        self.text_buffer += text_chunk
-        
-        # Get delimiters from ROS param and build a safe regex pattern
-        delimiters = self.get_parameter('sentence_delimiters').value
-        pattern = '|'.join(map(re.escape, delimiters))
-        pattern = f'({pattern})'
+        # STEP 1: Append the RAW text chunk to the buffer. That's it.
+        self.text_buffer += msg.data
 
-        # Split the text by delimiters, but keep the delimiters in the list
-        parts = re.split(pattern, self.text_buffer)
-        
-        # If parts has fewer than 2 elements, we don't have a complete sentence yet.
-        if len(parts) < 2:
-            # (Re)start a timer to flush the buffer if no new text comes in
-            self.flush_timer = self.create_timer(0.5, self.flush_buffer_callback)
-            return
-
-        # Reconstruct sentences by joining text parts with their delimiters
-        sentences = []
-        # Iterate in pairs (text, delimiter)
-        for i in range(0, len(parts) - 1, 2):
-            sentence = (parts[i] + parts[i+1]).strip()
-            if sentence: # Avoid adding empty/whitespace-only sentences
-                sentences.append(sentence)
-        
-        # The very last part is the new, incomplete buffer content
-        self.text_buffer = parts[-1]
-
-        sentences_max = self.get_parameter('sentences_max').value
-        
-        # Process sentence chunks if we have any
-        if sentences:
-            for i in range(0, len(sentences), sentences_max):
-                chunk = sentences[i:i + sentences_max]
-                text_to_process = " ".join(chunk)
-                self._process_text(text_to_process)
-
-        # (Re)start a timer to flush the buffer if no new text comes in
+        # STEP 2: (Re)start a timer to process the buffer after a pause.
         self.flush_timer = self.create_timer(0.5, self.flush_buffer_callback)
 
     def flush_buffer_callback(self):
         """
-        Processes any remaining text in the buffer after a pause.
+        Normalizes, splits, and processes the entire text buffer for TTS.
 
-        This method is triggered by a timer when no new text has arrived for a
-        short period, ensuring that the last sentence or fragment is not left
-        unspoken.
+        This method is the core of the text processing pipeline, triggered by a
+        timer after a pause in incoming text. It performs the following steps:
+        1. Takes the entire accumulated raw text from the buffer.
+        2. Applies the full normalization suite (regex filter, character filter,
+           and number separator removal) to the complete text block.
+        3. Based on the `split_sentences` parameter, it either:
+           a) (Default) Splits the cleaned text into sentences using custom
+              delimiters and processes them in chunks.
+           b) Hands the entire cleaned text block to the TTS engine, relying on
+              Coqui's internal splitter.
         """
-        # This timer is a one-shot, so cancel it to prevent it from running again.
+        # This timer is a one-shot, so cancel it.
         if self.flush_timer is not None:
             self.flush_timer.cancel()
             self.flush_timer = None
 
-        text_to_process = self.text_buffer.strip()
-        self.text_buffer = ""  # Clear buffer
-
-        if text_to_process:
-            self._process_text(text_to_process)
-        else:
+        if not self.text_buffer.strip():
             self.get_logger().debug("Flush timer ran, but buffer was empty.")
+            return
+
+        # Take the entire buffer content and clear the instance buffer immediately.
+        text_to_process_full = self.text_buffer
+        self.text_buffer = ""
+
+        # --- Start: All Filtering and Normalization on the complete text ---
+        # (This part is common to both splitting methods)
+        regex_pattern = self.get_parameter('text_filter_regex').value
+        if regex_pattern:
+            try:
+                text_to_process_full = re.sub(regex_pattern, '', text_to_process_full)
+            except re.error as e:
+                self.get_logger().error(f"Invalid regex: {e}")
+
+        filter_chars = self.get_parameter('text_filter_chars').value
+        if filter_chars:
+            translation_table = str.maketrans('', '', filter_chars)
+            text_to_process_full = text_to_process_full.translate(translation_table)
+
+        separator = self.get_parameter('number_thousands_separator').value
+        if separator:
+            escaped_separator = re.escape(separator)
+            text_to_process_full = re.sub(fr'(?<=\d){escaped_separator}(?=\d)', '', text_to_process_full)
+        # --- End: Filtering and Normalization ---
+
+        use_coqui_splitter = self.get_parameter('split_sentences').value
+
+        if use_coqui_splitter:
+            # --- PATH 1: COQUI HANDLES SPLITTING ---
+            self.get_logger().debug("Using Coqui's internal sentence splitter for the entire text block.")
+            if text_to_process_full.strip():
+                self._process_text(text_to_process_full)
+        else:
+            # --- PATH 2: MANUAL SPLITTING ---
+            self.get_logger().debug("Using manual splitting via 'sentence_delimiters'.")
+            delimiters = self.get_parameter('sentence_delimiters').value
+            pattern = '|'.join(map(re.escape, delimiters))
+            pattern = f'({pattern})'
+            parts = re.split(pattern, text_to_process_full)
+
+            sentences = []
+            for i in range(0, len(parts) - 1, 2):
+                sentence = (parts[i] + parts[i+1]).strip()
+                if sentence:
+                    sentences.append(sentence)
+
+            last_fragment = parts[-1].strip()
+            if last_fragment:
+                sentences.append(last_fragment)
+
+            if sentences:
+                sentences_max = self.get_parameter('sentences_max').value
+                for i in range(0, len(sentences), sentences_max):
+                    chunk = sentences[i:i + sentences_max]
+                    text_to_process_chunk = " ".join(chunk)
+                    self._process_text(text_to_process_chunk)
 
     def _process_text(self, text_to_process: str):
         """
-        The core TTS processing and audio generation logic.
+        Handles the final synthesis of a given text chunk.
 
-        This function takes a prepared text chunk, performs final trimming of
-        unwanted end characters, publishes the text to a topic, and then uses
-        the Coqui TTS model to generate audio. The audio is then played or
-        saved according to node parameters.
+        This function receives a fully prepared string (either a manually
+        created sentence chunk or a complete text block for Coqui to split).
+        It performs a final trim of trailing characters, publishes the text,
+        and calls the Coqui TTS engine to generate and play/save the audio.
 
         Args:
             text_to_process (str): The text string to synthesize.
         """
-        # Trim unwanted trailing characters from the text before processing
+        # --- Start: Final Text Cleanup ---
+
+        # Trim unwanted trailing characters from the text
         trim_chars = self.get_parameter('sentence_end_trim_chars').value
         if trim_chars:
             text_to_process = text_to_process.rstrip(trim_chars)
 
+        # --- End: Final Text Cleanup ---
+
         if not text_to_process:
+            self.get_logger().debug("Text is empty after cleanup, skipping.")
             return
 
         # Publish the text that is about to be spoken
@@ -395,7 +432,7 @@ class CoquiTTSnode(Node):
             # 1. Prepare arguments for TTS
             reference_wav = self.get_parameter('reference_wav').value
             model_name = self.get_parameter('model_name').value
-            
+
             tts_args = {
                 "text": text_to_process,
                 "split_sentences": self.get_parameter('split_sentences').value
@@ -423,7 +460,7 @@ class CoquiTTSnode(Node):
                 tts_args["top_p"] = self.get_parameter('top_p').value
 
             # Generate the audio using the received text
-            with RedirectOutput(self.get_logger()):
+            with RedirectOutput(self.get_logger(), 'debug'):
                 wav_data = self.tts.tts(**tts_args)
 
             # 2. Convert to NumPy array
