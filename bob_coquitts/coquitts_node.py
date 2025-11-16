@@ -49,9 +49,9 @@ class RedirectOutput:
             for line in output.splitlines():
                 if self._log_level == 'debug':
                     self._logger.debug(f"Coqui: {line}")
-                if self._log_level == 'warn':
+                elif self._log_level == 'warn':
                     self._logger.warn(f"Coqui: {line}")
-                if self._log_level == 'info':
+                elif self._log_level == 'info':
                     self._logger.info(f"Coqui: {line}")
 
 class CoquiTTSnode(Node):
@@ -192,11 +192,11 @@ class CoquiTTSnode(Node):
                 description="Characters used to split text into sentences. (env: COQUITTS_SENTENCE_DELIMITERS)"
             )
         )
-        self.declare_parameter('sentence_end_trim_chars',
-            os.environ.get('COQUITTS_SENTENCE_END_TRIM_CHARS', '.,:!?'),
+        self.declare_parameter('sentence_strip_chars',
+            os.environ.get('COQUITTS_SENTENCE_STRIP_CHARS', '.,:!? '),
             ParameterDescriptor(
                 type=ParameterType.PARAMETER_STRING,
-                description="A string of characters to remove from the end of each sentence before synthesis. (env: COQUITTS_SENTENCE_END_TRIM_CHARS)"
+                description="A string of characters to remove from the beginning and end of each sentence before synthesis. (env: COQUITTS_SENTENCE_STRIP_CHARS)"
             )
         )
         self.declare_parameter('text_filter_chars',
@@ -392,20 +392,15 @@ class CoquiTTSnode(Node):
 
         This function receives a fully prepared string (either a manually
         created sentence chunk or a complete text block for Coqui to split).
-        It performs a final trim of trailing characters, publishes the text,
-        and calls the Coqui TTS engine to generate and play/save the audio.
+        It performs a final strip of leading/trailing characters, publishes the
+        text, and calls the Coqui TTS engine to generate and play/save the audio.
 
         Args:
             text_to_process (str): The text string to synthesize.
         """
-        # --- Start: Final Text Cleanup ---
-
-        # Trim unwanted trailing characters from the text
-        trim_chars = self.get_parameter('sentence_end_trim_chars').value
-        if trim_chars:
-            text_to_process = text_to_process.rstrip(trim_chars)
-
-        # --- End: Final Text Cleanup ---
+        strip_chars = self.get_parameter('sentence_strip_chars').value
+        if strip_chars:
+            text_to_process = text_to_process.strip(strip_chars)
 
         if not text_to_process:
             self.get_logger().debug("Text is empty after cleanup, skipping.")
